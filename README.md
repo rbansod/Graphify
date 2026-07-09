@@ -48,18 +48,62 @@ Per-format extraction:
 
 | Format | Headings from | Notes |
 |---|---|---|
-| URL / HTML | `<h1>`–`<h6>` inside `main`/`article`/`body` | nav, footer, scripts, forms stripped first |
+| URL / HTML | `<h1>`–`<h6>` **plus heuristic detection** for headings living in divs/spans/bold text | see "Heading detection" below |
 | PDF | font-size heuristics via pdf.js | largest recurring sizes → levels 1–4; scanned PDFs (images only) yield no text |
 | DOCX | mammoth → HTML → same path as HTML | heading styles map to `<h1>`–`<h6>` |
 | Markdown | `#` prefixes | fenced code blocks ignored |
 | TXT | none | paragraphs grouped into windows for co-occurrence |
 
+### Heading detection in unstructured HTML
+
+Real pages often skip `<h1>`–`<h6>` entirely, so the HTML extractor doesn't rely on them. It linearizes the DOM into text blocks (runs of inline content inside any container — divs, spans, whatever), then scores every block for "headingness":
+
+- **Definite:** `h1`–`h6`, `role="heading"` (level from `aria-level`)
+- **Class/id hints:** `title`, `heading`, `headline`, `subtitle`, `section-title`, … (+); `nav`, `footer`, `btn`, `breadcrumb`, `meta`, … (−)
+- **Inline styling:** `font-size` ≥ 17px, `font-weight` ≥ 600, or the whole block wrapped in a single `<b>`/`<strong>`
+- **Text shape:** short (≤ 90 chars), few words, no terminal punctuation, Title Case / ALL CAPS
+- **Position:** followed by a longer block of body text
+
+Blocks above a threshold become headings. On pages that *do* have real `h1`–`h6` structure, the threshold rises so only strongly-signaled extras are added; on structureless pages it relaxes. Levels come from inline font size where available (largest = level 1); unsized detections share a peer level. External stylesheets can't be resolved through `DOMParser`, so styling signals are inline-only — class hints and text shape carry pages styled purely via CSS files.
+
 ## Known limitations
 
-- **CORS.** Direct cross-origin fetches usually fail, so the app falls back to public proxies (`allorigins.win`, `corsproxy.io`). Some sites block these too, and proxies are best-effort third-party services — for anything sensitive or internal, save the page and upload it instead.
+- **CORS.** Direct cross-origin fetches usually fail. Out of the box the app falls back to public proxies (`allorigins.win`, `corsproxy.io`), which are best-effort third-party services. For reliability, deploy the included Cloudflare Worker (below) — it becomes the first fallback and removes the third-party dependency.
 - **JavaScript-rendered pages.** The fetch returns raw HTML; SPAs that render client-side will look empty. Print-to-PDF or save the rendered page as HTML and upload.
 - **English stopwords only.** Other languages still work, but common function words will show up as topics unless you extend `STOPWORDS` in `app.js`.
 - **PDF outline quality** depends on the document using consistent font sizes for headings.
+
+## Optional: deploy your own fetch proxy (Cloudflare Worker)
+
+The `worker/` directory contains a hardened CORS proxy so URL fetching doesn't depend on public proxy services. Free-tier Workers (100k requests/day) is more than enough.
+
+```bash
+cd worker
+npx wrangler login      # once — opens browser auth
+npx wrangler deploy
+# → https://doc-atlas-proxy.<your-account>.workers.dev
+```
+
+Then point the frontend at it — one line in `app.js`:
+
+```js
+const OWN_PROXY = "https://doc-atlas-proxy.<your-account>.workers.dev";
+```
+
+The fetch order becomes: direct → your worker → public fallbacks.
+
+Before sharing the site publicly, lock the worker down in `worker/worker.js`:
+
+```js
+const ALLOWED_ORIGINS = ["https://<you>.github.io"];  // replace the "*"
+```
+
+What the worker enforces:
+
+- **SSRF guardrails** — only `http(s)` targets; loopback, RFC-1918 ranges, link-local (169.254.x — cloud metadata), and `.internal`/`.local` hosts are rejected.
+- **8 MB response cap** and a 15 s upstream timeout.
+- **5-minute edge caching** of fetched pages, which also keeps you well under the free-tier request limit.
+- Origin allowlist via CORS, so other sites can't quietly use your proxy.
 
 ## Stack
 

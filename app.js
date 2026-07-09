@@ -14,9 +14,14 @@
    0. Config
 ------------------------------------------------------------------ */
 
-// Public CORS proxies, tried in order after a direct fetch fails.
-// Each receives the encoded target URL appended.
+// Your own Cloudflare Worker proxy (see worker/ directory).
+// Set this after deploying — e.g. "https://doc-atlas-proxy.you.workers.dev"
+// Leave as "" to rely on the public fallbacks below.
+const OWN_PROXY = "";
+
+// Public CORS proxies, tried after the direct fetch and OWN_PROXY fail.
 const CORS_PROXIES = [
+  ...(OWN_PROXY ? [(u) => `${OWN_PROXY}/?url=${encodeURIComponent(u)}`] : []),
   (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
   (u) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
 ];
@@ -268,10 +273,25 @@ function finishAnalysis(model) {
    }
 ------------------------------------------------------------------ */
 
-const NOISE_TAGS = "script,style,noscript,svg,iframe,nav,footer,header,form,button,aside,template";
+const NOISE_TAGS = "script,style,noscript,svg,iframe,nav,footer,form,button,template,select,option,aside";
+
+// Tags treated as inline: their text belongs to the surrounding block.
+const INLINE_TAGS = new Set([
+  "A", "SPAN", "B", "STRONG", "EM", "I", "CODE", "SMALL", "SUP", "SUB",
+  "U", "MARK", "ABBR", "TIME", "BR", "WBR", "IMG", "LABEL", "Q", "S",
+  "CITE", "KBD", "SAMP", "VAR", "DATA", "BDI", "BDO", "PICTURE", "SOURCE",
+]);
+
+const CLASS_HINT_POSITIVE =
+  /(^|[\s_-])(title|heading|header|headline|subtitle|subheading|subhead|section[-_]?(title|head)|hd\d?|h[1-6])([\s_-]|$)/i;
+const CLASS_HINT_NEGATIVE =
+  /(^|[\s_-])(nav|menu|footer|btn|button|breadcrumb|crumb|tag|badge|label|meta|byline|date|share|social|ad|banner|cookie|toolbar|pagination)([\s_-]|$)/i;
 
 function extractFromHtmlDoc(doc, sourceLabel) {
   doc.querySelectorAll(NOISE_TAGS).forEach((n) => n.remove());
+  // <header> is noise at page level but legitimate inside articles/sections.
+  doc.querySelectorAll("body > header, body > * > header:first-child")
+    .forEach((n) => { if (!n.closest("main,article")) n.remove(); });
 
   const root =
     doc.querySelector("main") ||
@@ -279,40 +299,58 @@ function extractFromHtmlDoc(doc, sourceLabel) {
     doc.body ||
     doc.documentElement;
 
+  // 1. Segment the DOM into linear text blocks (document order).
+  //    A block is either a leaf block element or a run of inline
+  //    content inside a container — so text living in bare divs and
+  //    spans is captured, not just semantic tags.
+  const blocks = [];
+  segmentBlocks(root, blocks);
+
+  // 2. Score every block for "headingness".
+  //    Semantic h1–h6 are definite; everything else is judged on
+  //    class hints, inline styling, bold wrapping, and text shape.
+  const semanticCount = blocks.filter((b) => b.hLevel).length;
+  // On well-structured pages, demand stronger evidence before
+  // promoting a div to a heading; on structureless pages, relax.
+  const threshold = semanticCount >= 3 ? 4.5 : 3;
+
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    if (b.hLevel) { b.isHeading = true; continue; }
+    b.score = headingScore(b, blocks[i + 1]);
+    b.isHeading = b.score >= threshold;
+  }
+
+  // 3. Assign outline levels to heuristic headings.
+  assignHeuristicLevels(blocks);
+
+  // 4. Fold blocks into headings + sections.
   const headings = [];
   const sections = [];
   let current = { title: "(introduction)", level: 0, text: "" };
-
-  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
-  const flushIf = () => {
-    if (current.text.trim()) sections.push(current);
-  };
-
-  let node = root;
-  const visit = (el) => {
-    const tag = el.tagName;
-    if (/^H[1-6]$/.test(tag)) {
-      const text = cleanText(el.textContent);
-      if (text) {
-        const level = Number(tag[1]);
-        headings.push({ level, text });
-        flushIf();
-        current = { title: text, level, text: "" };
-      }
-    } else if (/^(P|LI|TD|TH|BLOCKQUOTE|PRE|FIGCAPTION|DT|DD|CAPTION|SUMMARY)$/.test(tag)) {
-      const text = cleanText(el.textContent);
-      if (text) current.text += text + "\n";
+  for (const b of blocks) {
+    if (b.isHeading) {
+      headings.push({ level: b.level, text: b.text });
+      if (current.text.trim()) sections.push(current);
+      current = { title: b.text, level: b.level, text: "" };
+    } else {
+      current.text += b.text + "\n";
     }
-  };
+  }
+  if (current.text.trim()) sections.push(current);
 
-  // TreeWalker gives document order, which keeps section boundaries correct.
-  while ((node = walker.nextNode())) visit(node);
-  flushIf();
-
-  // Fallback: pages built entirely from divs/spans.
-  if (!sections.length) {
-    const text = cleanText(root.textContent);
-    if (text) sections.push({ title: "(document)", level: 0, text });
+  // 5. Structureless page: window the blocks so co-occurrence still
+  //    has segments to work with instead of one giant blob.
+  if (!headings.length && sections.length <= 1) {
+    const paras = blocks.map((b) => b.text).filter(Boolean);
+    sections.length = 0;
+    for (let i = 0; i < paras.length; i += 12) {
+      sections.push({
+        title: `Part ${Math.floor(i / 12) + 1}`,
+        level: 0,
+        text: paras.slice(i, i + 12).join("\n"),
+      });
+    }
   }
 
   const title =
@@ -321,6 +359,156 @@ function extractFromHtmlDoc(doc, sourceLabel) {
     sourceLabel;
 
   return buildModel(sourceLabel, title, headings, sections);
+}
+
+/* Walk the tree, emitting blocks in document order. Runs of inline
+   nodes inside any container become one block; block-level children
+   recurse. This captures text no matter what tag it lives in. */
+function segmentBlocks(el, out) {
+  let runText = "";
+  let runEls = [];
+
+  const flush = () => {
+    const text = cleanText(runText);
+    if (text) {
+      const firstEl = runEls.find((n) => n.nodeType === 1) || null;
+      out.push(makeBlock(text, el, firstEl, runEls));
+    }
+    runText = "";
+    runEls = [];
+  };
+
+  for (const child of el.childNodes) {
+    if (child.nodeType === 3) {           // text node
+      runText += child.textContent;
+      runEls.push(child);
+    } else if (child.nodeType === 1) {    // element
+      if (INLINE_TAGS.has(child.tagName)) {
+        runText += " " + child.textContent + " ";
+        runEls.push(child);
+      } else {
+        flush();
+        segmentBlocks(child, out);
+      }
+    }
+  }
+  flush();
+}
+
+function makeBlock(text, container, firstEl, runEls) {
+  const b = { text, container, firstEl, level: 0, score: 0, isHeading: false };
+
+  const tag = container.tagName || "";
+  const hMatch = tag.match(/^H([1-6])$/);
+  if (hMatch) {
+    b.hLevel = Number(hMatch[1]);
+    b.level = b.hLevel;
+  } else if (container.getAttribute?.("role") === "heading") {
+    b.hLevel = Number(container.getAttribute("aria-level")) || 2;
+    b.level = b.hLevel;
+  }
+
+  // Font size / weight from inline styles (external CSS is not
+  // resolvable through DOMParser, so this is best-effort).
+  b.fontSize = readFontSize(container) || (firstEl && readFontSize(firstEl)) || 0;
+  b.bold =
+    isBoldStyle(container) || (firstEl && isBoldStyle(firstEl)) ||
+    isFullyWrapped(text, runEls, ["B", "STRONG"]);
+
+  b.classHint = classHint(container) + (firstEl ? classHint(firstEl) : 0);
+  return b;
+}
+
+function readFontSize(el) {
+  const raw = el.style?.fontSize;
+  if (!raw) return 0;
+  const v = parseFloat(raw);
+  if (Number.isNaN(v)) return 0;
+  if (raw.endsWith("pt")) return v * 1.333;
+  if (raw.endsWith("em") || raw.endsWith("rem")) return v * 16;
+  return v; // px or unitless
+}
+
+function isBoldStyle(el) {
+  const w = el.style?.fontWeight;
+  return w === "bold" || w === "bolder" || Number(w) >= 600;
+}
+
+// True when a single <b>/<strong> element carries essentially the
+// whole run — the classic hand-rolled heading.
+function isFullyWrapped(text, runEls, tags) {
+  const els = runEls.filter((n) => n.nodeType === 1 && cleanText(n.textContent));
+  return (
+    els.length === 1 &&
+    tags.includes(els[0].tagName) &&
+    cleanText(els[0].textContent).length >= text.length * 0.9
+  );
+}
+
+function classHint(el) {
+  const hint = `${el.className || ""} ${el.id || ""}`;
+  let score = 0;
+  if (CLASS_HINT_POSITIVE.test(hint)) score += 2.5;
+  if (CLASS_HINT_NEGATIVE.test(hint)) score -= 2.5;
+  return score;
+}
+
+function headingScore(b, next) {
+  const len = b.text.length;
+  if (len < 3 || len > 110) return -Infinity;
+  if (!/[a-zA-Z]/.test(b.text)) return -Infinity;
+
+  let score = b.classHint;
+
+  if (b.fontSize >= 20) score += 2;
+  else if (b.fontSize >= 17) score += 1;
+  if (b.bold) score += 1.5;
+
+  // Text shape: short, no terminal punctuation, few words.
+  if (len <= 90 && !/[.!?;:,]$/.test(b.text)) score += 1;
+  const words = b.text.split(/\s+/);
+  if (words.length <= 12) score += 0.5;
+
+  // ALL CAPS or Title Case reads as a header.
+  const letters = b.text.replace(/[^a-zA-Z]/g, "");
+  if (letters.length >= 3 && letters === letters.toUpperCase()) score += 0.75;
+  else {
+    const capped = words.filter((w) => /^[A-Z]/.test(w)).length;
+    if (words.length >= 2 && capped / words.length >= 0.7) score += 0.5;
+  }
+
+  // A heading is usually followed by something longer than itself.
+  if (next && next.text.length > len * 1.5) score += 1;
+
+  return score;
+}
+
+/* Heuristic headings get levels from inline font size when available
+   (largest = highest level). Headings with no size signal are peers:
+   they all share one level below the sized ones. */
+function assignHeuristicLevels(blocks) {
+  const heuristic = blocks.filter((b) => b.isHeading && !b.hLevel);
+  if (!heuristic.length) return;
+
+  const sizes = [...new Set(
+    heuristic.filter((b) => b.fontSize > 0).map((b) => Math.round(b.fontSize))
+  )].sort((a, b) => b - a).slice(0, 3);
+
+  const semanticLevels = blocks.filter((b) => b.hLevel).map((b) => b.hLevel);
+  // With semantic headings present, heuristic ones nest below the
+  // deepest semantic level; otherwise they start at level 1.
+  const base = semanticLevels.length
+    ? Math.min(5, Math.max(...semanticLevels) + 1)
+    : 1;
+
+  for (const b of heuristic) {
+    if (b.fontSize > 0) {
+      const rank = Math.max(0, sizes.indexOf(Math.round(b.fontSize)));
+      b.level = Math.min(6, base + rank);
+    } else {
+      b.level = Math.min(6, base + sizes.length); // shared peer level
+    }
+  }
 }
 
 async function extractFromPdf(file) {
