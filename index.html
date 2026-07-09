@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Doc Atlas — outline &amp; topic map for any page or document</title>
+  <meta name="description" content="Paste a URL or drop a document to generate its table of contents and an interactive topic graph." />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="wordmark">
+      <svg class="wordmark-glyph" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="6" cy="6" r="2.6"/><circle cx="18" cy="8" r="2.2"/><circle cx="10" cy="18" r="3"/>
+        <path d="M7.8 7.5 9 15.2 M8.4 6.6 16 7.8 M12.6 16.6 16.6 9.9" stroke-width="1.4" fill="none"/>
+      </svg>
+      <span class="wordmark-text">Doc&nbsp;Atlas</span>
+      <span class="wordmark-sub">outline + topic map</span>
+    </div>
+
+    <div class="intake">
+      <div class="intake-row">
+        <input id="url-input" type="url" inputmode="url" spellcheck="false"
+               placeholder="https:// — paste a page URL" aria-label="Page URL" />
+        <button id="analyze-url" class="btn btn-primary" type="button">Map page</button>
+      </div>
+      <div class="intake-row">
+        <label id="drop-zone" class="drop-zone" for="file-input" tabindex="0">
+          <input id="file-input" type="file"
+                 accept=".pdf,.docx,.html,.htm,.md,.markdown,.txt,application/pdf,text/html,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden />
+          <span class="drop-zone-text">or drop a file here — <strong>PDF, DOCX, HTML, Markdown, TXT</strong></span>
+        </label>
+      </div>
+    </div>
+  </header>
+
+  <!-- readout strip: live measurements of the loaded document -->
+  <div id="readout" class="readout" hidden>
+    <span class="readout-item"><span class="readout-key">source</span><span id="stat-source" class="readout-val readout-source">—</span></span>
+    <span class="readout-item"><span class="readout-key">words</span><span id="stat-words" class="readout-val">0</span></span>
+    <span class="readout-item"><span class="readout-key">headings</span><span id="stat-headings" class="readout-val">0</span></span>
+    <span class="readout-item"><span class="readout-key">topics</span><span id="stat-topics" class="readout-val">0</span></span>
+    <span class="readout-item"><span class="readout-key">edges</span><span id="stat-links" class="readout-val">0</span></span>
+  </div>
+
+  <div id="status" class="status" hidden>
+    <span class="spinner" aria-hidden="true"></span>
+    <span id="status-text">Fetching page…</span>
+  </div>
+
+  <div id="error" class="error" role="alert" hidden></div>
+
+  <main id="workspace" class="workspace" hidden>
+
+    <aside class="panel panel-toc">
+      <div class="panel-head">
+        <h2 class="panel-title">Table of contents</h2>
+        <button id="copy-toc" class="btn btn-ghost" type="button" title="Copy the outline as Markdown">Copy as Markdown</button>
+      </div>
+      <nav id="toc" class="toc" aria-label="Document outline"></nav>
+      <p id="toc-empty" class="empty-note" hidden>
+        No headings were found in this document. The topic map on the right is built from paragraph text instead.
+      </p>
+    </aside>
+
+    <section class="panel panel-graph">
+      <div class="panel-head">
+        <h2 class="panel-title">Topic map</h2>
+        <div class="graph-legend">
+          <span class="legend-item"><span class="legend-dot"></span> size = mentions</span>
+          <span class="legend-item"><span class="legend-line"></span> line = co-occurrence</span>
+          <button id="reset-view" class="btn btn-ghost" type="button">Reset view</button>
+        </div>
+      </div>
+      <div id="graph-wrap" class="graph-wrap">
+        <svg id="graph" role="img" aria-label="Topic co-occurrence graph"></svg>
+        <div id="topic-detail" class="topic-detail" hidden></div>
+      </div>
+      <p class="graph-hint">Drag nodes to rearrange. Scroll to zoom. Click a topic for its connections and the sections it appears in.</p>
+    </section>
+
+  </main>
+
+  <section id="landing" class="landing">
+    <h1 class="landing-title">Turn any page into a map.</h1>
+    <p class="landing-copy">
+      Doc Atlas reads a web page or document and produces two views of it: a <strong>table of contents</strong>
+      rebuilt from its heading structure, and a <strong>topic graph</strong> showing which subjects the text
+      keeps returning to, how often, and which ones travel together.
+    </p>
+    <ul class="landing-notes">
+      <li>Everything runs in your browser — nothing you load is sent to a server owned by this app.</li>
+      <li>Cross-origin pages are fetched through a public CORS proxy; a few sites block this.</li>
+      <li>PDF headings are inferred from font sizes, so scanned or unusual PDFs may show a flat outline.</li>
+    </ul>
+  </section>
+
+  <footer class="footer">
+    <span>Doc Atlas · static site, deployable on GitHub Pages</span>
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
